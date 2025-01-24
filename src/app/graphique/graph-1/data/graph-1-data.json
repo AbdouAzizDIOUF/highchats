@@ -1,0 +1,4 @@
+[
+  { "category": "DD", "emissionsEvitees": -20, "emissionsGenerees": 30, "tonnage": 30 },
+  { "category": "DND", "emissionsEvitees": 50, "emissionsGenerees": 200, "tonnage": 300 }
+]
