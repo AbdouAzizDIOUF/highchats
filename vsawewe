@@ -1,0 +1,184 @@
+@let helper = helperModel();
+@let socialShareContextValue = socialShareContext();
+
+@if ((!formGroup.get('input')?.pristine) && shouldDisplayAmountValue()) {
+  <p class="amount">
+    {{ currentAmountValue() | currency: 'EUR' : 'symbol' : '1.2-2' }}
+  </p>
+}
+
+@if (shouldDisplayShimmering()) {
+  <div class="shimmering">
+    <p>Soit&nbsp;</p>
+    <neo-shimmering
+      [shape]="'line'"
+      aria-label="Chargement en cours"
+      class="shimmering-data-line"
+    />
+    <p>&nbsp;parts sociales</p>
+  </div>
+}
+
+<lib-information-prompt-layout
+  [description]="
+    'header.description'
+      | wording
+        : {
+            wording: template,
+            replacement: {
+              SHARE_AMOUNT:
+                socialShareContextValue?.shareAmount
+                | currency: 'EUR' : 'symbol' : '1.2-2',
+            },
+          }
+  "
+  [title]="
+    getTitle()
+      | wording
+        : {
+            wording: template,
+            replacement: { MAX_AMOUNT: selectedPartsNumber() },
+          }
+  "
+>
+  <div class="container">
+    <form [formGroup]="formGroup">
+      <neo-input-amount
+        (blur)="onValueChange()"
+        (focus)="isInputFocused.set(true)"
+        (input)="onInputChange($event)"
+        [precision]="inputPrecision()"
+        (clear)="clear()"
+        [size]="'l'"
+        class="neo-slider-with-input"
+        formControlName="input"
+        label="Montant"
+      >
+        @if (helper.shouldDisplayHelper) {
+          <neo-text-helper
+            [type]="helper.helperType === 'warning' ? 'warning' : 'default'"
+            [iconAriaLabel]="helper.helperType === 'warning' ? 'warning' : 'default'"
+          >
+            {{
+              helper.helperKey
+                | wording
+                : {
+                    wording: template,
+                    replacement: {
+                      HELPER_AMOUNT:
+                        helper.helperAmount | currency: "EUR" : "symbol" : "1.2-2",
+                    },
+                  }
+            }}
+          </neo-text-helper>
+        } @else {
+          <neo-text-helper type="default" [iconAriaLabel]="'default'">
+            {{
+              "form.helper.infoAmount"
+                | wording
+                : {
+                    wording: template,
+                    replacement: {
+                      SHARE_AMOUNT:
+                        socialShareContextValue?.shareAmount
+                          | currency: "EUR" : "symbol" : "1.2-2",
+                    },
+                  }
+            }}
+          </neo-text-helper>
+        }
+      </neo-input-amount>
+    </form>
+
+    <neo-slider
+      (valueChange)="formGroup.get('input')?.setValue($event)"
+      [ariaLabel]="''"
+      [maxLabel]="' '"
+      [max]="socialShareContextValue?.maximumAmount || 0"
+      [minLabel]="' '"
+      [min]="socialShareContextValue?.minimumAmount || 0"
+      [precision]="2"
+      [step]="socialShareContextValue?.shareAmount || 0"
+      [value]="currentAmountValue()"
+    />
+
+    <div class="helpers">
+      <neo-text-helper type="default">
+        {{ socialShareContextValue?.minimumAmount | currency: "EUR" : "symbol" : "1.2-2" }}
+      </neo-text-helper>
+
+      <neo-text-helper type="default">
+        {{ socialShareContextValue?.maximumAmount | currency: "EUR" : "symbol" : "1.2-2" }}
+      </neo-text-helper>
+
+      <neo-text-helper type="default">
+        {{
+          "form.helper.shareSlider"
+            | wording
+              : {
+                  wording: template,
+                  replacement: { NUMBER_SHARE: socialShareContextValue?.minimumParts },
+                }
+        }}
+      </neo-text-helper>
+
+      <neo-text-helper type="default">
+        {{
+          "form.helper.shareSlider"
+            | wording
+              : {
+                  wording: template,
+                  replacement: { NUMBER_SHARE: socialShareContextValue?.maximumParts },
+                }
+        }}
+      </neo-text-helper>
+    </div>
+
+    <div neoCard>
+      <div class="slot-content">
+        <p class="info-title">{{ template.infobox.title }}</p>
+        <p class="bullet">{{ template.infobox.bullet1 }}</p>
+
+        @if (supportsPdfViewer) {
+          <button
+            class="download"
+            neoButton
+            [variant]="'secondary-outline'"
+            [iconPosition]="'right'"
+            [icon]="'download'"
+            aria-haspopup="dialog"
+            (click)="openDefault()"
+          >
+            {{ template.infobox.download }}
+          </button>
+        } @else {
+          <a
+            class="download"
+            neoButton
+            [iconPosition]="'right'"
+            [variant]="'secondary-outline'"
+            [icon]="'download'"
+            [href]="noticeLink()"
+          >
+            {{ template.infobox.download }}
+          </a>
+        }
+
+        <p class="bullet">{{ template.infobox.bullet2 }}</p>
+      </div>
+    </div>
+  </div>
+
+  <div cta>
+    <div [alignment]="'block'" neoButtonGroup>
+      <button
+        (click)="continue()"
+        alignment="block"
+        neoButton
+        [disabled]="formGroup.invalid || (formGroup.get('input')?.value ?? 0) <= 0"
+      >
+        {{ template.action }}
+      </button>
+    </div>
+  </div>
+</lib-information-prompt-layout>
