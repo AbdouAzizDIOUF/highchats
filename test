@@ -1,31 +1,69 @@
-import { ChangeDetectionStrategy, Component, computed, DestroyRef, effect, inject, OnInit, signal } from '@angular/core';
-import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  OnInit,
+  computed,
+  effect,
+  inject,
+  signal,
+  untracked,
+} from '@angular/core';
+import { CurrencyPipe } from '@angular/common';
+import { Router } from '@angular/router';
+import {
+  FormControl,
+  FormGroup,
+  ReactiveFormsModule,
+  Validators,
+} from '@angular/forms';
+import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
+import { switchMap } from 'rxjs';
+
 import { NeoTextHelperComponent } from '@bpce/neo-ng/text-helper';
 import { InformationPromptLayoutComponent } from '@bpce/ng-subscription-ui/information-prompt-layout';
 import { NeoButtonComponent, NeoButtonGroupComponent } from '@bpce/neo-ng/button';
 import { NeoSliderComponent } from '@bpce/neo-ng/slider';
-import { SAISIE_PARTS_WORDING } from '@app/constants/wording/saisie-parts-wording.constant';
 import { NeoCardComponent } from '@bpce/neo-ng/card';
 import { NeoDialogModule, NeoDialogService } from '@bpce/neo-ng/dialog';
-import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
-import { switchMap } from 'rxjs';
+import { NeoInputAmountComponent } from '@bpce/neo-ng/input-amount';
+import { NeoShimmeringComponent } from '@bpce/neo-ng/shimmering';
+
+import { StepRouteEnum } from '@app/routes';
+import { BapiStoreService } from '@app/services/store/bapi.store.service';
+import { InputStoreService } from '@app/services/store/input.store.service';
+import { DigitalParameters } from '@app/models/digital-parameters';
+import { SAISIE_PART_PAGE_DATALAYER } from '@app/constants/tracking/tracking.constant';
+import { TrackingService } from '@bpce/ng-subscription-services/tracking';
+import { BapiStore } from '@bpce/ng-subscription-services/bapi/store';
+import { NestedKeys, WordingPipe } from '@bpce/ng-subscription-ui/utils';
+
 import { PdfViewModalComponent } from '../modals/pdf-view-modal/pdf-view.modal.component';
 import { UpdateAmountModalComponent } from '../modals/update-amount-modal/update-amount.modal.component';
-import { NeoInputAmountComponent } from '@bpce/neo-ng/input-amount';
-import { StepRouteEnum } from '@app/routes';
-import { Router } from '@angular/router';
-import { BapiStoreService } from '@app/services/store/bapi.store.service';
-import { NestedKeys, WordingPipe } from '@bpce/ng-subscription-ui/utils';
-import { CurrencyPipe } from '@angular/common';
-import { InputStoreService } from '@app/services/store/input.store.service';
-import { BapiStore } from '@bpce/ng-subscription-services/bapi/store';
-import { DigitalParameters } from '@app/models/digital-parameters';
-import { NeoShimmeringComponent } from '@bpce/neo-ng/shimmering';
-import { TrackingService } from '@bpce/ng-subscription-services/tracking';
-import { SAISIE_PART_PAGE_DATALAYER } from '@app/constants/tracking/tracking.constant';
+import { SAISIE_PARTS_WORDING } from '@app/constants/wording/saisie-parts-wording.constant';
+
+type WordingKey = NestedKeys<typeof SAISIE_PARTS_WORDING>;
+
+interface ShareData {
+  shareAmount: number;
+  minAmount: number;
+  maxAmount: number;
+  selectableMaxAmount: number;
+  minParts: number;
+  maxParts: number;
+  maximumAllowedAmount: number;
+  maximumAllowedParts: number;
+}
+
+interface HelperState {
+  type: 'default' | 'warning';
+  key: WordingKey;
+  amount: number;
+}
 
 @Component({
   selector: 'app-saisie-parts',
+  standalone: true, // a retirer si le composant est declare dans un NgModule
   templateUrl: './saisie-parts.component.html',
   styleUrl: './saisie-parts.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -41,21 +79,20 @@ import { SAISIE_PART_PAGE_DATALAYER } from '@app/constants/tracking/tracking.con
     NeoInputAmountComponent,
     WordingPipe,
     CurrencyPipe,
-    NeoShimmeringComponent
-  ]
+    NeoShimmeringComponent,
+  ],
 })
 export class SaisiePartsComponent implements OnInit {
-
-  protected displayHelper: boolean = false;
-  protected showShimmering: boolean = false;
-
-  protected helperKey: NestedKeys<typeof SAISIE_PARTS_WORDING> = 'form.helper.infoAmount';
-  protected helperAmount: number = 0;
-  protected rawInputValue: number = 0;
-  protected maximumAllowedAmount: number = 0;
-  protected maximumAllowedParts: number = 0;
-
   readonly template = SAISIE_PARTS_WORDING;
+
+  protected readonly isInputFocused = signal(false);
+  protected readonly showShimmering = signal(false);
+
+  private readonly hasUserInteracted = signal(false);
+  private readonly lastEnteredAmount = signal<number | null>(null);
+  private readonly initialized = signal(false);
+
+  private readonly centRatio = 100;
 
   private readonly trackingService = inject(TrackingService);
   private readonly neoDialog = inject(NeoDialogService);
@@ -65,149 +102,261 @@ export class SaisiePartsComponent implements OnInit {
   private readonly inputStore = inject(InputStoreService);
   private readonly bapiStoreParam: BapiStore<DigitalParameters> = inject(BapiStore);
 
-  private readonly CENT_RATIO = 100;
+  protected readonly supportsPdfViewer =
+    typeof navigator !== 'undefined' &&
+    'pdfViewerEnabled' in navigator &&
+    Boolean((navigator as Navigator & { pdfViewerEnabled?: boolean }).pdfViewerEnabled);
 
+  readonly formGroup = new FormGroup({
+    input: new FormControl<number | null>(null, {
+      validators: [Validators.required, Validators.min(0.01)],
+    }),
+  });
 
-  protected showValue: boolean = false;
-  readonly isInputFocused = signal(false);
-  readonly shareData = computed(() => {
+  private readonly amountControl = this.formGroup.controls.input;
+
+  readonly amountValue = toSignal(this.amountControl.valueChanges, {
+    initialValue: this.amountControl.value,
+  });
+
+  readonly shareData = computed<ShareData | null>(() => {
     const condition = this.bapiStore.conditionSocialShare.value();
     const selectedAccount = this.bapiStore.selectedAccount();
-    const shareAmount = this.bapiStore.shareAmount();
+    const balance = this.inputStore.accountSelected()?.balance ?? null;
 
-
-    if (condition && selectedAccount) {
-
-      let balance: number | undefined = this.inputStore.accountSelected()?.balance;
-      if (balance) {
-        this.maximumAllowedParts = Math.floor(balance / selectedAccount.shareAmount.value);
-        this.maximumAllowedAmount = this.maximumAllowedParts * selectedAccount.shareAmount.value;
-      }
-
-
-      return {
-        shareAmount: shareAmount,
-        miniAmount: condition.characteristics.minimumShareNumber * selectedAccount.shareAmount.value,
-        maxAmount: condition.characteristics.remainingAmountToInvest.value,
-        minParts: condition.characteristics.minimumShareNumber,
-        maxParts: Math.floor(condition.characteristics.remainingAmountToInvest.value / selectedAccount.shareAmount.value)
-      };
+    if (!condition || !selectedAccount) {
+      return null;
     }
-    return undefined;
+
+    const shareAmount = selectedAccount.shareAmount.value;
+    const minParts = condition.characteristics.minimumShareNumber;
+    const maxAmount = condition.characteristics.remainingAmountToInvest.value;
+    const maxParts = Math.floor(maxAmount / shareAmount);
+
+    if (maxParts < minParts) {
+      return null;
+    }
+
+    const maximumAllowedParts =
+      balance != null ? Math.max(0, Math.floor(balance / shareAmount)) : 0;
+
+    return {
+      shareAmount,
+      minParts,
+      maxParts,
+      minAmount: minParts * shareAmount,
+      maxAmount,
+      selectableMaxAmount: maxParts * shareAmount,
+      maximumAllowedParts,
+      maximumAllowedAmount: maximumAllowedParts * shareAmount,
+    };
   });
 
-  readonly selectedShareAmount = signal(0);
-  protected supportsPdfViewer: boolean = navigator.pdfViewerEnabled;
+  readonly noticeLink = computed(() => {
+    return this.bapiStoreParam.digitalParameters.value()?.links.technicalNoticeLink ?? null;
+  });
 
-
-  precision = computed(() => {
+  readonly normalizedAmount = computed<number | null>(() => {
     const data = this.shareData();
-    if (
-      data !== undefined &&
-      Number.isInteger(this.selectedShareAmount() * data.shareAmount) &&
-      !this.isInputFocused()
-    ) {
+    const amount = this.amountValue();
+
+    if (!data || amount == null || Number.isNaN(amount)) {
+      return null;
+    }
+
+    return this.normalizeAmount(amount, data);
+  });
+
+  readonly displayAmount = computed<number | null>(() => {
+    const raw = this.amountValue();
+    const normalized = this.normalizedAmount();
+
+    if (this.showShimmering() && raw != null && !Number.isNaN(raw)) {
+      return raw;
+    }
+
+    return normalized;
+  });
+
+  readonly selectedShareCount = computed(() => {
+    const data = this.shareData();
+    const amount = this.normalizedAmount();
+
+    if (!data || amount == null) {
       return 0;
     }
-    return 2;
+
+    return Math.round(this.toCents(amount) / this.toCents(data.shareAmount));
   });
 
-  public readonly getNoticeLink = computed(() => {
-    return this.bapiStoreParam.digitalParameters.value()?.links.technicalNoticeLink;
+  readonly precision = computed(() => {
+    const amount = this.normalizedAmount();
+    return !this.isInputFocused() && amount != null && Number.isInteger(amount) ? 0 : 2;
   });
 
-
-  readonly formGroup = new FormGroup({ input: new FormControl<any>(this.shareData()?.miniAmount, [Validators.required]) });
-
-  readonly formValue = toSignal(this.formGroup.valueChanges, { initialValue: this.formGroup.value });
-  readonly formStatus = toSignal(this.formGroup.events);
-
-  get inputValue(): number {
-    return this.formGroup.get('input')?.value || this.shareData()?.miniAmount;
-  }
-
-  set inputValue(value: number | null) {
+  readonly helperState = computed<HelperState>(() => {
     const data = this.shareData();
-    if (value !== null && data !== undefined) {
-      this.closestShareNumberfromAmount(value);
-      this.displayHelper = false;
-      this.formGroup.get('input')?.markAsDirty();
+    const raw = this.lastEnteredAmount();
+    const normalized = this.normalizedAmount();
+
+    if (!data || raw == null || normalized == null || !this.hasUserInteracted() || this.showShimmering()) {
+      return {
+        type: 'default',
+        key: 'form.helper.infoAmount',
+        amount: data?.shareAmount ?? 0,
+      };
     }
-  }
+
+    if (raw > data.maxAmount) {
+      return {
+        type: 'warning',
+        key: 'form.helper.infoAmountMax',
+        amount: data.selectableMaxAmount,
+      };
+    }
+
+    if (raw < data.minAmount) {
+      return {
+        type: 'warning',
+        key: 'form.helper.infoAmountMin',
+        amount: data.minAmount,
+      };
+    }
+
+    if (!this.sameAmount(raw, normalized)) {
+      return {
+        type: 'warning',
+        key: 'form.helper.inputErreur',
+        amount: data.shareAmount,
+      };
+    }
+
+    return {
+      type: 'default',
+      key: 'form.helper.infoAmount',
+      amount: data.shareAmount,
+    };
+  });
+
+  readonly titleKey = computed<WordingKey>(() => {
+    const data = this.shareData();
+    const amount = this.normalizedAmount();
+
+    if (!data || amount == null || !this.hasUserInteracted()) {
+      return 'header.title.default';
+    }
+
+    if (this.showShimmering()) {
+      return 'header.title.editedShimmering';
+    }
+
+    return this.sameAmount(amount, data.minAmount)
+      ? 'header.title.default'
+      : 'header.title.edited';
+  });
+
+  readonly canContinue = computed(() => {
+    const data = this.shareData();
+    const raw = this.amountValue();
+    return !!data && raw != null && raw > 0 && this.formGroup.valid;
+  });
 
   constructor() {
-    effect(() => {
-      if (this.precision() !== 0) {
-        this.formGroup.get('input')?.setValue(this.inputValue);
-      }
-    });
+    effect(
+      () => {
+        const data = this.shareData();
+
+        if (!data || this.initialized()) {
+          return;
+        }
+
+        const storedShareNumber = this.inputStore.shareNumber() ?? 0;
+        const initialAmount =
+          storedShareNumber > 0
+            ? this.normalizeAmount(storedShareNumber * data.shareAmount, data)
+            : data.minAmount;
+
+        untracked(() => {
+          this.formGroup.reset({ input: initialAmount });
+          this.lastEnteredAmount.set(initialAmount);
+          this.hasUserInteracted.set(storedShareNumber > 0);
+
+          if (storedShareNumber > 0) {
+            this.amountControl.markAsDirty();
+          }
+
+          this.initialized.set(true);
+        });
+      },
+      { allowSignalWrites: true }
+    );
   }
 
   ngOnInit(): void {
-    this.trackPage();
-    this.initShares();
+    this.trackingService.trackPage(SAISIE_PART_PAGE_DATALAYER);
   }
 
-  onValueChange(_$event: any) {
-    this.showShimmering = false;
-    let value = this.formGroup.get('input')?.value;
-    this.rawInputValue = value;
-    this.getHelpers(value);
+  onInputFocus(): void {
+    this.isInputFocused.set(true);
+  }
+
+  onInputChange(event: Event): void {
+    this.showShimmering.set(true);
+    this.hasUserInteracted.set(true);
+    this.lastEnteredAmount.set(this.parseAmount(event) ?? this.amountControl.value);
+  }
+
+  onInputBlur(): void {
     this.isInputFocused.set(false);
+    this.showShimmering.set(false);
+
     const data = this.shareData();
-    if (value && data !== undefined) {
-      value = this.closestShareNumberfromAmount(value);
-      const lowerMultiple = Math.floor(value / data.shareAmount) * data.shareAmount;
-      const upperMultiple = Math.ceil(value / data.shareAmount) * data.shareAmount;
+    const raw = this.amountControl.value;
 
-      let closestMultiple = value - lowerMultiple < upperMultiple - value ? lowerMultiple : upperMultiple;
+    this.lastEnteredAmount.set(raw);
 
-      closestMultiple = this.roundAmountApproximation(closestMultiple);
-
-      if (value !== closestMultiple) {
-        this.formGroup.get('input')?.setValue(closestMultiple);
-      }
-      this.showValue = !!this.formValue().input;
-      this.displayHelper = (!data || value <= data.miniAmount || value >= data.maxAmount);
-      this.isInputFocused.set(false);
+    if (!data || raw == null || Number.isNaN(raw)) {
+      return;
     }
-  }
 
-  onInputChange(event: any) {
-    const inputElement = event.target as HTMLInputElement;
-    this.rawInputValue = Number.parseFloat(inputElement.value);
-    this.showShimmering = true;
-  }
+    const normalized = this.normalizeAmount(raw, data);
 
-  getHelpers(value: number) {
-    if (value > this.shareData()!.maxAmount) {
-      this.helperAmount = this.shareData()!.maxAmount;
-      this.helperKey = 'form.helper.infoAmountMax';
-    } else if (value < this.shareData()!.miniAmount) {
-      this.helperAmount = this.shareData()!.miniAmount;
-      this.helperKey = 'form.helper.infoAmountMin';
-    } else {
-      this.helperAmount = this.shareData()!.shareAmount;
-      this.helperKey = 'form.helper.inputErreur';
+    if (!this.sameAmount(raw, normalized)) {
+      this.amountControl.setValue(normalized);
     }
+
+    this.amountControl.markAsDirty();
   }
 
-  clear() {
+  onSliderChange(value: number): void {
     const data = this.shareData();
-    if (data) {
-      this.formGroup.reset({ input: data.miniAmount }, { emitEvent: true });
+
+    if (!data) {
+      return;
     }
+
+    const normalized = this.normalizeAmount(value, data);
+
+    this.isInputFocused.set(false);
+    this.showShimmering.set(false);
+    this.hasUserInteracted.set(true);
+    this.lastEnteredAmount.set(normalized);
+
+    this.amountControl.setValue(normalized);
+    this.amountControl.markAsDirty();
   }
 
-  initShares() {
-    const shareNumber = this.inputStore.shareNumber();
+  clear(): void {
     const data = this.shareData();
-    if (data && shareNumber && shareNumber > 0) {
-      this.selectedShareAmount.set(shareNumber);
-      this.formGroup.get('input')?.setValue(shareNumber * data.shareAmount);
-      this.formGroup.get('input')?.markAsDirty();
-      this.showValue = true;
+
+    if (!data) {
+      return;
     }
+
+    this.showShimmering.set(false);
+    this.hasUserInteracted.set(false);
+    this.lastEnteredAmount.set(data.minAmount);
+    this.formGroup.reset({ input: data.minAmount });
   }
 
   openDefault(): void {
@@ -220,97 +369,75 @@ export class SaisiePartsComponent implements OnInit {
       .subscribe();
   }
 
-  continue() {
+  continue(): void {
     const data = this.shareData();
-    let balance: number | undefined =
-      this.inputStore.accountSelected()?.balance;
-    if (data) {
-      if (
-        balance &&
-        (this.formGroup.get('input')?.value > data.maxAmount ||
-          this.formGroup.get('input')?.value > balance)
-      ) {
-        this.neoDialog
-          .open(UpdateAmountModalComponent, {
-            data: {
-              maximumAllowedAmount: this.maximumAllowedAmount,
-              maximumAllowedParts: this.maximumAllowedParts
-            }
-          })
-          .pipe(
-            switchMap((ref) => ref.afterClose()),
-            takeUntilDestroyed(this.destroyRef)
-          )
-          .subscribe();
-      } else {
-        if (this.selectedShareAmount() < data.minParts) {
-          this.selectedShareAmount.set(data.minParts);
-        } else if (this.selectedShareAmount() > data.maxParts) {
-          this.selectedShareAmount.set(data.maxParts);
-        }
+    const amount = this.normalizedAmount();
+    const balance = this.inputStore.accountSelected()?.balance ?? null;
 
-        this.inputStore.setShareNumberSelected(this.selectedShareAmount());
-        this.router.navigate([StepRouteEnum.QUESTION_INTRO]);
-      }
+    if (!data || amount == null || !this.canContinue()) {
+      return;
     }
+
+    if (balance != null && amount > balance) {
+      this.neoDialog
+        .open(UpdateAmountModalComponent, {
+          data: {
+            maximumAllowedAmount: data.maximumAllowedAmount,
+            maximumAllowedParts: data.maximumAllowedParts,
+          },
+        })
+        .pipe(
+          switchMap((ref) => ref.afterClose()),
+          takeUntilDestroyed(this.destroyRef)
+        )
+        .subscribe();
+
+      return;
+    }
+
+    this.inputStore.setShareNumberSelected(this.selectedShareCount());
+    this.router.navigate([StepRouteEnum.QUESTION_INTRO]);
   }
 
+  private normalizeAmount(value: number, data: ShareData): number {
+    const clamped = Math.min(Math.max(value, data.minAmount), data.maxAmount);
+    const shareAmountInCents = this.toCents(data.shareAmount);
 
-  getTitle(): NestedKeys<typeof SAISIE_PARTS_WORDING> {
-    const data = this.shareData();
-    if (data) {
-      if (this.formValue().input === data.miniAmount) {
-        return 'header.title.default';
-      }
-    }
-    if (!this.formStatus()) {
-      return 'header.title.default';
-    }
-    if (this.formValue().input) {
-      this.showValue = true;
-      return this.showShimmering
-        ? 'header.title.editedShimmering'
-        : 'header.title.edited';
-    } else {
-      this.showValue = false;
-      return 'header.title.default';
-    }
+    let shareCount = Math.round(this.toCents(clamped) / shareAmountInCents);
+    shareCount = Math.min(Math.max(shareCount, data.minParts), data.maxParts);
+
+    return this.fromCents(shareCount * shareAmountInCents);
   }
 
-  trackPage() {
-    this.trackingService.trackPage(SAISIE_PART_PAGE_DATALAYER);
+  private parseAmount(event: Event): number | null {
+    const rawValue = (event.target as HTMLInputElement | null)?.value ?? '';
+    const normalizedValue = rawValue.replace(/\s/g, '').replace(',', '.');
+    const parsed = Number.parseFloat(normalizedValue);
+
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
-  private closestShareNumberfromAmount(value: number): number {
-    const data = this.shareData();
-    let finalValue = value;
-    if (value && data !== undefined) {
-      if (value > data.maxAmount) {
-        this.displayHelper = true;
-        finalValue = data.maxAmount;
-      } else if (value < data.miniAmount) {
-        this.displayHelper = true;
-        finalValue = data.miniAmount;
-      }
-      this.formGroup.get('input')?.setValue(finalValue);
-
-      this.selectedShareAmount.set(Math.floor(finalValue / data.shareAmount));
-    }
-    return finalValue;
+  private sameAmount(a: number, b: number): boolean {
+    return this.toCents(a) === this.toCents(b);
   }
 
-  private roundAmountApproximation(amount: number) {
-    return Math.round(amount * this.CENT_RATIO) / this.CENT_RATIO;
+  private toCents(amount: number): number {
+    return Math.round(amount * this.centRatio);
+  }
+
+  private fromCents(amountInCents: number): number {
+    return amountInCents / this.centRatio;
   }
 }
 
 
 
 
-@if ((!formGroup.get('input')?.pristine) && showValue) {
-  <p class="amount">{{ inputValue | currency: 'EUR' : 'symbol' : '1.2-2' }} </p>
+@if (showValue()) {
+  <p class="amount">{{ displayAmount() | currency: 'EUR' : 'symbol' : '1.2-2' }}</p>
 }
-@if (showShimmering) {
+
+@if (showShimmering()) {
   <div class="shimmering">
     <p>Soit&nbsp;</p>
     <neo-shimmering
@@ -321,6 +448,7 @@ export class SaisiePartsComponent implements OnInit {
     <p>&nbsp;parts sociales</p>
   </div>
 }
+
 <lib-information-prompt-layout
   [description]="
     'header.description'
@@ -329,44 +457,42 @@ export class SaisiePartsComponent implements OnInit {
             wording: template,
             replacement: {
               SHARE_AMOUNT:
-                this.shareData()?.shareAmount
-                | currency: 'EUR' : 'symbol' : '1.2-2',
+                shareData()?.shareAmount | currency: 'EUR' : 'symbol' : '1.2-2',
             },
           }
   "
   [title]="
-    getTitle()
+    titleKey()
       | wording
         : {
             wording: template,
-            replacement: { MAX_AMOUNT: selectedShareAmount() },
+            replacement: { PART_COUNT: selectedShareCount() },
           }
   "
 >
   <div class="container">
     <form [formGroup]="formGroup">
       <neo-input-amount
-        #input
-        (blur)="onValueChange($event)"
-        (focus)="isInputFocused.set(true)"
-        (input)="onInputChange($event)"
-        [precision]="precision()"
-        (clear)="clear()"
-        [size]="'l'"
-        class="neo-slider-with-input"
         formControlName="input"
+        class="neo-slider-with-input"
         label="Montant"
+        [size]="'l'"
+        [precision]="precision()"
+        (focus)="onInputFocus()"
+        (input)="onInputChange($event)"
+        (blur)="onInputBlur()"
+        (clear)="clear()"
       >
-        @if (displayHelper) {
-          <neo-text-helper type="warning" [iconAriaLabel]="'warning'"
-            >{{
-              helperKey
+        @if (helperState().type === 'warning') {
+          <neo-text-helper type="warning" [iconAriaLabel]="'warning'">
+            {{
+              helperState().key
                 | wording
                   : {
                       wording: template,
                       replacement: {
                         HELPER_AMOUNT:
-                          helperAmount | currency: "EUR" : "symbol" : "1.2-2",
+                          helperState().amount | currency: 'EUR' : 'symbol' : '1.2-2',
                       },
                     }
             }}
@@ -374,14 +500,13 @@ export class SaisiePartsComponent implements OnInit {
         } @else {
           <neo-text-helper type="default" [iconAriaLabel]="'default'">
             {{
-              "form.helper.infoAmount"
+              'form.helper.infoAmount'
                 | wording
                   : {
                       wording: template,
                       replacement: {
                         SHARE_AMOUNT:
-                          shareData()?.shareAmount
-                          | currency: "EUR" : "symbol" : "1.2-2",
+                          shareData()?.shareAmount | currency: 'EUR' : 'symbol' : '1.2-2',
                       },
                     }
             }}
@@ -391,27 +516,29 @@ export class SaisiePartsComponent implements OnInit {
     </form>
 
     <neo-slider
-      (valueChange)="inputValue = $event"
       [ariaLabel]="''"
-      [maxLabel]="' '"
-      [max]="shareData()?.maxAmount || 0"
-      [minLabel]="' '"
-      [min]="shareData()?.miniAmount || 0"
+      [min]="shareData()?.minAmount ?? 0"
+      [max]="shareData()?.selectableMaxAmount ?? 0"
+      [step]="shareData()?.shareAmount ?? 0"
       [precision]="2"
-      [step]="shareData()?.shareAmount || 0"
-      [value]="inputValue"
+      [minLabel]="' '"
+      [maxLabel]="' '"
+      [value]="normalizedAmount() ?? 0"
+      (valueChange)="onSliderChange($event)"
     />
 
     <div class="helpers">
-      <neo-text-helper type="default"
-        >{{ shareData()?.miniAmount | currency: "EUR" : "symbol" : "1.2-2" }}
+      <neo-text-helper type="default">
+        {{ shareData()?.minAmount | currency: 'EUR' : 'symbol' : '1.2-2' }}
       </neo-text-helper>
-      <neo-text-helper type="default"
-        >{{ shareData()?.maxAmount | currency: "EUR" : "symbol" : "1.2-2" }}
+
+      <neo-text-helper type="default">
+        {{ shareData()?.selectableMaxAmount | currency: 'EUR' : 'symbol' : '1.2-2' }}
       </neo-text-helper>
-      <neo-text-helper type="default"
-        >{{
-          "form.helper.shareSlider"
+
+      <neo-text-helper type="default">
+        {{
+          'form.helper.shareSlider'
             | wording
               : {
                   wording: template,
@@ -419,9 +546,10 @@ export class SaisiePartsComponent implements OnInit {
                 }
         }}
       </neo-text-helper>
-      <neo-text-helper type="default"
-        >{{
-          "form.helper.shareSlider"
+
+      <neo-text-helper type="default">
+        {{
+          'form.helper.shareSlider'
             | wording
               : {
                   wording: template,
@@ -435,6 +563,7 @@ export class SaisiePartsComponent implements OnInit {
       <div class="slot-content">
         <p class="info-title">{{ template.infobox.title }}</p>
         <p class="bullet">{{ template.infobox.bullet1 }}</p>
+
         @if (supportsPdfViewer) {
           <button
             class="download"
@@ -451,80 +580,28 @@ export class SaisiePartsComponent implements OnInit {
           <a
             class="download"
             neoButton
-            [iconPosition]="'right'"
             [variant]="'secondary-outline'"
+            [iconPosition]="'right'"
             [icon]="'download'"
-            [href]="getNoticeLink()"
+            [href]="noticeLink()"
           >
             {{ template.infobox.download }}
           </a>
         }
+
         <p class="bullet">{{ template.infobox.bullet2 }}</p>
       </div>
     </div>
   </div>
+
   <div cta>
-    <div [alignment]="'block'" neoButtonGroup>
-      <button (click)="continue()" alignment="block" neoButton
-      [disabled]="formGroup.invalid || formGroup.get('input')?.value <= 0" >
+    <div neoButtonGroup [alignment]="'block'">
+      <button neoButton alignment="block" (click)="continue()" [disabled]="!canContinue()">
         {{ template.action }}
       </button>
     </div>
   </div>
 </lib-information-prompt-layout>
 
-
-export const SAISIE_PARTS_WORDING = {
-  header: {
-    title: {
-      default: 'Quel montant de parts sociales souhaitez-vous souscrire ?',
-      edited: 'soit {{MAX_AMOUNT}} {{MAX_AMOUNT | plural : s[part sociale] p[parts sociales] }}',
-      editedShimmering: ' '
-    },
-    description: 'Valeur nominale d\'une part : {{SHARE_AMOUNT}} '
-  },
-  form: {
-    helper: {
-      inputErreur: 'Le montant a été ajusté à un multiple de {{HELPER_AMOUNT}}',
-      shareSlider: 'soit {{NUMBER_SHARE}}  {{NUMBER_SHARE | plural : s[part] p[parts] }}',
-      infoAmount: 'Le montant doit être un multiple de {{SHARE_AMOUNT}}',
-      infoAmountMax: 'le montant a été ajusté au montant maximum de {{HELPER_AMOUNT}} euros',
-      infoAmountMin: 'le montant a été ajusté au montant minimum de {{HELPER_AMOUNT}} euros'
-    }
-
-  },
-  infobox: {
-    title: 'Avant de souscrire',
-    download: 'Télécharger',
-    bullet1: 'Consultez les principales caractéristiques des parts sociales',
-    bullet2:
-      'En cliquant sur continuer, vous certifiez que le montant total de parts sociales ne dépasse pas 25% de l’ensemble de vos fonds détenus au sein de notre établissement bancaire.'
-  },
-  action: 'Continuer'
-};
-
-export const SAISIE_PARTS_MODAL_WORDING = {
-  title: 'Document d’information',
-  actions: {
-    download: 'Télécharger le document',
-    close: 'Fermer'
-  }
-};
-
-export const UPDATE_AMOUNT_TEMPLATE = {
-  title: 'Montant maximum atteint',
-  warning: {
-    title:
-      'Pour poursuivre votre souscription vous devez alimenter votre compte',
-    description:
-      'Actuellement le solde de votre compte vous permet de souscrire jusqu’à 7020  , soit 351 parts sociales ',
-    illustration: 'objet_sablier',
-    buttons: []
-  },
-  actions: {
-    amount: 'Modifier mon montant',
-    fund: 'Alimenter mon compte'
-  }
-};
 
 
