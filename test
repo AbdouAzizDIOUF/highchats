@@ -1,22 +1,136 @@
+// saisie-parts.utils.ts
+export interface ShareData {
+  shareAmount: number;
+  miniAmount: number;
+  maxAmount: number;
+  minParts: number;
+  maxParts: number;
+}
+
+export interface AllowedAmountData {
+  maximumAllowedParts: number;
+  maximumAllowedAmount: number;
+}
+
+export interface ShareHelperState {
+  key: string;
+  amount: number;
+  display: boolean;
+}
+
+const CENT_RATIO = 100;
+
+export function computeShareData(
+  minimumShareNumber: number,
+  remainingAmountToInvest: number,
+  shareAmount: number
+): ShareData {
+  return {
+    shareAmount,
+    miniAmount: minimumShareNumber * shareAmount,
+    maxAmount: remainingAmountToInvest,
+    minParts: minimumShareNumber,
+    maxParts: Math.floor(remainingAmountToInvest / shareAmount)
+  };
+}
+
+export function computeAllowedAmountData(
+  balance: number | undefined,
+  shareAmount: number
+): AllowedAmountData {
+  if (!balance || shareAmount <= 0) {
+    return {
+      maximumAllowedAmount: 0,
+      maximumAllowedParts: 0
+    };
+  }
+
+  const maximumAllowedParts = Math.floor(balance / shareAmount);
+  return {
+    maximumAllowedParts,
+    maximumAllowedAmount: maximumAllowedParts * shareAmount
+  };
+}
+
+export function roundAmountApproximation(amount: number): number {
+  return Math.round(amount * CENT_RATIO) / CENT_RATIO;
+}
+
+export function clampAmount(value: number, min: number, max: number): number {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
+export function snapToClosestMultiple(value: number, step: number): number {
+  const lowerMultiple = Math.floor(value / step) * step;
+  const upperMultiple = Math.ceil(value / step) * step;
+
+  const closestMultiple =
+    value - lowerMultiple < upperMultiple - value
+      ? lowerMultiple
+      : upperMultiple;
+
+  return roundAmountApproximation(closestMultiple);
+}
+
+export function normalizeAmount(value: number, data: ShareData): number {
+  const clamped = clampAmount(value, data.miniAmount, data.maxAmount);
+  return snapToClosestMultiple(clamped, data.shareAmount);
+}
+
+export function computeSelectedShareAmount(amount: number, shareAmount: number): number {
+  return Math.floor(amount / shareAmount);
+}
+
+export function buildHelperState(value: number, data: ShareData): ShareHelperState {
+  if (value > data.maxAmount) {
+    return {
+      display: true,
+      key: 'form.helper.infoAmountMax',
+      amount: data.maxAmount
+    };
+  }
+
+  if (value < data.miniAmount) {
+    return {
+      display: true,
+      key: 'form.helper.infoAmountMin',
+      amount: data.miniAmount
+    };
+  }
+
+  const normalized = snapToClosestMultiple(value, data.shareAmount);
+
+  if (normalized !== value) {
+    return {
+      display: true,
+      key: 'form.helper.inputErreur',
+      amount: data.shareAmount
+    };
+  }
+
+  return {
+    display: false,
+    key: 'form.helper.infoAmount',
+    amount: data.shareAmount
+  };
+}
+
+
+
 import {
   ChangeDetectionStrategy,
   Component,
   DestroyRef,
   OnInit,
   computed,
-  effect,
   inject,
-  signal,
-  untracked,
+  signal
 } from '@angular/core';
 import { CurrencyPipe } from '@angular/common';
 import { Router } from '@angular/router';
-import {
-  FormControl,
-  FormGroup,
-  ReactiveFormsModule,
-  Validators,
-} from '@angular/forms';
+import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
 import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { switchMap } from 'rxjs';
 
@@ -29,41 +143,30 @@ import { NeoDialogModule, NeoDialogService } from '@bpce/neo-ng/dialog';
 import { NeoInputAmountComponent } from '@bpce/neo-ng/input-amount';
 import { NeoShimmeringComponent } from '@bpce/neo-ng/shimmering';
 
+import { NestedKeys, WordingPipe } from '@bpce/ng-subscription-ui/utils';
+import { BapiStore } from '@bpce/ng-subscription-services/bapi/store';
+import { TrackingService } from '@bpce/ng-subscription-services/tracking';
+
 import { StepRouteEnum } from '@app/routes';
+import { SAISIE_PARTS_WORDING } from '@app/constants/wording/saisie-parts-wording.constant';
+import { SAISIE_PART_PAGE_DATALAYER } from '@app/constants/tracking/tracking.constant';
 import { BapiStoreService } from '@app/services/store/bapi.store.service';
 import { InputStoreService } from '@app/services/store/input.store.service';
 import { DigitalParameters } from '@app/models/digital-parameters';
-import { SAISIE_PART_PAGE_DATALAYER } from '@app/constants/tracking/tracking.constant';
-import { TrackingService } from '@bpce/ng-subscription-services/tracking';
-import { BapiStore } from '@bpce/ng-subscription-services/bapi/store';
-import { NestedKeys, WordingPipe } from '@bpce/ng-subscription-ui/utils';
 
 import { PdfViewModalComponent } from '../modals/pdf-view-modal/pdf-view.modal.component';
 import { UpdateAmountModalComponent } from '../modals/update-amount-modal/update-amount.modal.component';
-import { SAISIE_PARTS_WORDING } from '@app/constants/wording/saisie-parts-wording.constant';
 
-type WordingKey = NestedKeys<typeof SAISIE_PARTS_WORDING>;
-
-interface ShareData {
-  shareAmount: number;
-  minAmount: number;
-  maxAmount: number;
-  selectableMaxAmount: number;
-  minParts: number;
-  maxParts: number;
-  maximumAllowedAmount: number;
-  maximumAllowedParts: number;
-}
-
-interface HelperState {
-  type: 'default' | 'warning';
-  key: WordingKey;
-  amount: number;
-}
+import {
+  buildHelperState,
+  computeAllowedAmountData,
+  computeSelectedShareAmount,
+  computeShareData,
+  normalizeAmount
+} from './saisie-parts.utils';
 
 @Component({
   selector: 'app-saisie-parts',
-  standalone: true, // a retirer si le composant est declare dans un NgModule
   templateUrl: './saisie-parts.component.html',
   styleUrl: './saisie-parts.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -79,20 +182,11 @@ interface HelperState {
     NeoInputAmountComponent,
     WordingPipe,
     CurrencyPipe,
-    NeoShimmeringComponent,
-  ],
+    NeoShimmeringComponent
+  ]
 })
 export class SaisiePartsComponent implements OnInit {
   readonly template = SAISIE_PARTS_WORDING;
-
-  protected readonly isInputFocused = signal(false);
-  protected readonly showShimmering = signal(false);
-
-  private readonly hasUserInteracted = signal(false);
-  private readonly lastEnteredAmount = signal<number | null>(null);
-  private readonly initialized = signal(false);
-
-  private readonly centRatio = 100;
 
   private readonly trackingService = inject(TrackingService);
   private readonly neoDialog = inject(NeoDialogService);
@@ -102,264 +196,175 @@ export class SaisiePartsComponent implements OnInit {
   private readonly inputStore = inject(InputStoreService);
   private readonly bapiStoreParam: BapiStore<DigitalParameters> = inject(BapiStore);
 
-  protected readonly supportsPdfViewer =
-    typeof navigator !== 'undefined' &&
-    'pdfViewerEnabled' in navigator &&
-    Boolean((navigator as Navigator & { pdfViewerEnabled?: boolean }).pdfViewerEnabled);
+  readonly isInputFocused = signal(false);
+  readonly showShimmering = signal(false);
+  readonly rawInputValue = signal<number | null>(null);
 
   readonly formGroup = new FormGroup({
     input: new FormControl<number | null>(null, {
-      validators: [Validators.required, Validators.min(0.01)],
-    }),
+      validators: [Validators.required]
+    })
   });
 
-  private readonly amountControl = this.formGroup.controls.input;
+  readonly inputControl = this.formGroup.controls.input;
 
-  readonly amountValue = toSignal(this.amountControl.valueChanges, {
-    initialValue: this.amountControl.value,
+  readonly formValue = toSignal(this.formGroup.valueChanges, {
+    initialValue: this.formGroup.getRawValue()
   });
 
-  readonly shareData = computed<ShareData | null>(() => {
+  readonly shareData = computed(() => {
     const condition = this.bapiStore.conditionSocialShare.value();
     const selectedAccount = this.bapiStore.selectedAccount();
-    const balance = this.inputStore.accountSelected()?.balance ?? null;
 
     if (!condition || !selectedAccount) {
       return null;
     }
 
-    const shareAmount = selectedAccount.shareAmount.value;
-    const minParts = condition.characteristics.minimumShareNumber;
-    const maxAmount = condition.characteristics.remainingAmountToInvest.value;
-    const maxParts = Math.floor(maxAmount / shareAmount);
-
-    if (maxParts < minParts) {
-      return null;
-    }
-
-    const maximumAllowedParts =
-      balance != null ? Math.max(0, Math.floor(balance / shareAmount)) : 0;
-
-    return {
-      shareAmount,
-      minParts,
-      maxParts,
-      minAmount: minParts * shareAmount,
-      maxAmount,
-      selectableMaxAmount: maxParts * shareAmount,
-      maximumAllowedParts,
-      maximumAllowedAmount: maximumAllowedParts * shareAmount,
-    };
+    return computeShareData(
+      condition.characteristics.minimumShareNumber,
+      condition.characteristics.remainingAmountToInvest.value,
+      selectedAccount.shareAmount.value
+    );
   });
 
-  readonly noticeLink = computed(() => {
-    return this.bapiStoreParam.digitalParameters.value()?.links.technicalNoticeLink ?? null;
-  });
-
-  readonly normalizedAmount = computed<number | null>(() => {
+  readonly allowedAmountData = computed(() => {
     const data = this.shareData();
-    const amount = this.amountValue();
+    const balance = this.inputStore.accountSelected()?.balance;
 
-    if (!data || amount == null || Number.isNaN(amount)) {
-      return null;
+    if (!data) {
+      return {
+        maximumAllowedAmount: 0,
+        maximumAllowedParts: 0
+      };
     }
 
-    return this.normalizeAmount(amount, data);
+    return computeAllowedAmountData(balance, data.shareAmount);
   });
 
-  readonly displayAmount = computed<number | null>(() => {
-    const raw = this.amountValue();
-    const normalized = this.normalizedAmount();
-
-    if (this.showShimmering() && raw != null && !Number.isNaN(raw)) {
-      return raw;
-    }
-
-    return normalized;
-  });
-
-  readonly selectedShareCount = computed(() => {
+  readonly selectedShareAmount = computed(() => {
     const data = this.shareData();
-    const amount = this.normalizedAmount();
+    const value = this.inputControl.value;
 
-    if (!data || amount == null) {
+    if (!data || value == null) {
       return 0;
     }
 
-    return Math.round(this.toCents(amount) / this.toCents(data.shareAmount));
+    return computeSelectedShareAmount(value, data.shareAmount);
   });
 
-  readonly precision = computed(() => {
-    const amount = this.normalizedAmount();
-    return !this.isInputFocused() && amount != null && Number.isInteger(amount) ? 0 : 2;
-  });
-
-  readonly helperState = computed<HelperState>(() => {
+  readonly helperState = computed(() => {
     const data = this.shareData();
-    const raw = this.lastEnteredAmount();
-    const normalized = this.normalizedAmount();
+    const value = this.rawInputValue() ?? this.inputControl.value;
 
-    if (!data || raw == null || normalized == null || !this.hasUserInteracted() || this.showShimmering()) {
+    if (!data || value == null) {
       return {
-        type: 'default',
-        key: 'form.helper.infoAmount',
-        amount: data?.shareAmount ?? 0,
+        display: false,
+        key: 'form.helper.infoAmount' as NestedKeys<typeof SAISIE_PARTS_WORDING>,
+        amount: 0
       };
     }
 
-    if (raw > data.maxAmount) {
-      return {
-        type: 'warning',
-        key: 'form.helper.infoAmountMax',
-        amount: data.selectableMaxAmount,
-      };
-    }
-
-    if (raw < data.minAmount) {
-      return {
-        type: 'warning',
-        key: 'form.helper.infoAmountMin',
-        amount: data.minAmount,
-      };
-    }
-
-    if (!this.sameAmount(raw, normalized)) {
-      return {
-        type: 'warning',
-        key: 'form.helper.inputErreur',
-        amount: data.shareAmount,
-      };
-    }
+    const helper = buildHelperState(value, data);
 
     return {
-      type: 'default',
-      key: 'form.helper.infoAmount',
-      amount: data.shareAmount,
+      display: helper.display,
+      key: helper.key as NestedKeys<typeof SAISIE_PARTS_WORDING>,
+      amount: helper.amount
     };
   });
 
-  readonly titleKey = computed<WordingKey>(() => {
-    const data = this.shareData();
-    const amount = this.normalizedAmount();
+  readonly showValue = computed(() => {
+    return !this.inputControl.pristine && !!this.inputControl.value;
+  });
 
-    if (!data || amount == null || !this.hasUserInteracted()) {
+  readonly precision = computed(() => {
+    const data = this.shareData();
+    const selectedShareAmount = this.selectedShareAmount();
+
+    if (
+      data &&
+      Number.isInteger(selectedShareAmount * data.shareAmount) &&
+      !this.isInputFocused()
+    ) {
+      return 0;
+    }
+
+    return 2;
+  });
+
+  readonly titleKey = computed((): NestedKeys<typeof SAISIE_PARTS_WORDING> => {
+    const data = this.shareData();
+    const inputValue = this.inputControl.value;
+
+    if (!data || inputValue == null || inputValue === data.miniAmount) {
       return 'header.title.default';
     }
 
-    if (this.showShimmering()) {
-      return 'header.title.editedShimmering';
-    }
-
-    return this.sameAmount(amount, data.minAmount)
-      ? 'header.title.default'
+    return this.showShimmering()
+      ? 'header.title.editedShimmering'
       : 'header.title.edited';
   });
 
-  readonly canContinue = computed(() => {
-    const data = this.shareData();
-    const raw = this.amountValue();
-    return !!data && raw != null && raw > 0 && this.formGroup.valid;
+  readonly isContinueDisabled = computed(() => {
+    const value = this.inputControl.value;
+    return this.formGroup.invalid || !value || value <= 0;
   });
 
-  constructor() {
-    effect(
-      () => {
-        const data = this.shareData();
+  readonly supportsPdfViewer = 'pdfViewerEnabled' in navigator
+    ? !!navigator.pdfViewerEnabled
+    : false;
 
-        if (!data || this.initialized()) {
-          return;
-        }
-
-        const storedShareNumber = this.inputStore.shareNumber() ?? 0;
-        const initialAmount =
-          storedShareNumber > 0
-            ? this.normalizeAmount(storedShareNumber * data.shareAmount, data)
-            : data.minAmount;
-
-        untracked(() => {
-          this.formGroup.reset({ input: initialAmount });
-          this.lastEnteredAmount.set(initialAmount);
-          this.hasUserInteracted.set(storedShareNumber > 0);
-
-          if (storedShareNumber > 0) {
-            this.amountControl.markAsDirty();
-          }
-
-          this.initialized.set(true);
-        });
-      },
-      { allowSignalWrites: true }
-    );
-  }
+  readonly getNoticeLink = computed(() => {
+    return this.bapiStoreParam.digitalParameters.value()?.links.technicalNoticeLink;
+  });
 
   ngOnInit(): void {
-    this.trackingService.trackPage(SAISIE_PART_PAGE_DATALAYER);
+    this.trackPage();
+    this.initShares();
   }
 
-  onInputFocus(): void {
-    this.isInputFocused.set(true);
-  }
-
-  onInputChange(event: Event): void {
-    this.showShimmering.set(true);
-    this.hasUserInteracted.set(true);
-    this.lastEnteredAmount.set(this.parseAmount(event) ?? this.amountControl.value);
-  }
-
-  onInputBlur(): void {
-    this.isInputFocused.set(false);
-    this.showShimmering.set(false);
-
+  onValueBlur(): void {
     const data = this.shareData();
-    const raw = this.amountControl.value;
+    const value = this.inputControl.value;
 
-    this.lastEnteredAmount.set(raw);
+    this.showShimmering.set(false);
+    this.isInputFocused.set(false);
 
-    if (!data || raw == null || Number.isNaN(raw)) {
+    if (!data || value == null) {
       return;
     }
 
-    const normalized = this.normalizeAmount(raw, data);
+    const normalizedAmount = normalizeAmount(value, data);
 
-    if (!this.sameAmount(raw, normalized)) {
-      this.amountControl.setValue(normalized);
+    if (normalizedAmount !== value) {
+      this.inputControl.setValue(normalizedAmount);
     }
+  }
 
-    this.amountControl.markAsDirty();
+  onInputChange(event: Event): void {
+    const inputElement = event.target as HTMLInputElement;
+    this.rawInputValue.set(Number.parseFloat(inputElement.value));
+    this.showShimmering.set(true);
   }
 
   onSliderChange(value: number): void {
     const data = this.shareData();
+    if (!data) return;
 
-    if (!data) {
-      return;
-    }
-
-    const normalized = this.normalizeAmount(value, data);
-
-    this.isInputFocused.set(false);
+    const normalizedAmount = normalizeAmount(value, data);
+    this.inputControl.setValue(normalizedAmount);
+    this.inputControl.markAsDirty();
     this.showShimmering.set(false);
-    this.hasUserInteracted.set(true);
-    this.lastEnteredAmount.set(normalized);
-
-    this.amountControl.setValue(normalized);
-    this.amountControl.markAsDirty();
   }
 
   clear(): void {
     const data = this.shareData();
+    if (!data) return;
 
-    if (!data) {
-      return;
-    }
-
-    this.showShimmering.set(false);
-    this.hasUserInteracted.set(false);
-    this.lastEnteredAmount.set(data.minAmount);
-    this.formGroup.reset({ input: data.minAmount });
+    this.inputControl.reset(data.miniAmount);
   }
 
-  openDefault(): void {
+  openTechnicalNotice(): void {
     this.neoDialog
       .open(PdfViewModalComponent)
       .pipe(
@@ -369,22 +374,24 @@ export class SaisiePartsComponent implements OnInit {
       .subscribe();
   }
 
-  continue(): void {
+  onContinue(): void {
     const data = this.shareData();
-    const amount = this.normalizedAmount();
-    const balance = this.inputStore.accountSelected()?.balance ?? null;
+    const value = this.inputControl.value;
+    const balance = this.inputStore.accountSelected()?.balance;
 
-    if (!data || amount == null || !this.canContinue()) {
+    if (!data || value == null) {
       return;
     }
 
-    if (balance != null && amount > balance) {
+    if (balance && (value > data.maxAmount || value > balance)) {
+      const allowed = this.allowedAmountData();
+
       this.neoDialog
         .open(UpdateAmountModalComponent, {
           data: {
-            maximumAllowedAmount: data.maximumAllowedAmount,
-            maximumAllowedParts: data.maximumAllowedParts,
-          },
+            maximumAllowedAmount: allowed.maximumAllowedAmount,
+            maximumAllowedParts: allowed.maximumAllowedParts
+          }
         })
         .pipe(
           switchMap((ref) => ref.afterClose()),
@@ -395,46 +402,36 @@ export class SaisiePartsComponent implements OnInit {
       return;
     }
 
-    this.inputStore.setShareNumberSelected(this.selectedShareCount());
+    const selectedShareAmount = Math.min(
+      Math.max(this.selectedShareAmount(), data.minParts),
+      data.maxParts
+    );
+
+    this.inputStore.setShareNumberSelected(selectedShareAmount);
     this.router.navigate([StepRouteEnum.QUESTION_INTRO]);
   }
 
-  private normalizeAmount(value: number, data: ShareData): number {
-    const clamped = Math.min(Math.max(value, data.minAmount), data.maxAmount);
-    const shareAmountInCents = this.toCents(data.shareAmount);
+  private initShares(): void {
+    const shareNumber = this.inputStore.shareNumber();
+    const data = this.shareData();
 
-    let shareCount = Math.round(this.toCents(clamped) / shareAmountInCents);
-    shareCount = Math.min(Math.max(shareCount, data.minParts), data.maxParts);
+    if (!data || !shareNumber || shareNumber <= 0) {
+      this.inputControl.setValue(data?.miniAmount ?? null);
+      return;
+    }
 
-    return this.fromCents(shareCount * shareAmountInCents);
+    this.inputControl.setValue(shareNumber * data.shareAmount);
+    this.inputControl.markAsDirty();
   }
 
-  private parseAmount(event: Event): number | null {
-    const rawValue = (event.target as HTMLInputElement | null)?.value ?? '';
-    const normalizedValue = rawValue.replace(/\s/g, '').replace(',', '.');
-    const parsed = Number.parseFloat(normalizedValue);
-
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  private sameAmount(a: number, b: number): boolean {
-    return this.toCents(a) === this.toCents(b);
-  }
-
-  private toCents(amount: number): number {
-    return Math.round(amount * this.centRatio);
-  }
-
-  private fromCents(amountInCents: number): number {
-    return amountInCents / this.centRatio;
+  private trackPage(): void {
+    this.trackingService.trackPage(SAISIE_PART_PAGE_DATALAYER);
   }
 }
 
 
-
-
 @if (showValue()) {
-  <p class="amount">{{ displayAmount() | currency: 'EUR' : 'symbol' : '1.2-2' }}</p>
+  <p class="amount">{{ inputControl.value | currency: 'EUR' : 'symbol' : '1.2-2' }}</p>
 }
 
 @if (showShimmering()) {
@@ -456,9 +453,8 @@ export class SaisiePartsComponent implements OnInit {
         : {
             wording: template,
             replacement: {
-              SHARE_AMOUNT:
-                shareData()?.shareAmount | currency: 'EUR' : 'symbol' : '1.2-2',
-            },
+              SHARE_AMOUNT: shareData()?.shareAmount | currency: 'EUR' : 'symbol' : '1.2-2'
+            }
           }
   "
   [title]="
@@ -466,24 +462,24 @@ export class SaisiePartsComponent implements OnInit {
       | wording
         : {
             wording: template,
-            replacement: { PART_COUNT: selectedShareCount() },
+            replacement: { MAX_AMOUNT: selectedShareAmount() }
           }
   "
 >
   <div class="container">
     <form [formGroup]="formGroup">
       <neo-input-amount
-        formControlName="input"
-        class="neo-slider-with-input"
-        label="Montant"
-        [size]="'l'"
-        [precision]="precision()"
-        (focus)="onInputFocus()"
+        (blur)="onValueBlur()"
+        (focus)="isInputFocused.set(true)"
         (input)="onInputChange($event)"
-        (blur)="onInputBlur()"
         (clear)="clear()"
+        [precision]="precision()"
+        [size]="'l'"
+        class="neo-slider-with-input"
+        formControlName="input"
+        label="Montant"
       >
-        @if (helperState().type === 'warning') {
+        @if (helperState().display) {
           <neo-text-helper type="warning" [iconAriaLabel]="'warning'">
             {{
               helperState().key
@@ -491,9 +487,8 @@ export class SaisiePartsComponent implements OnInit {
                   : {
                       wording: template,
                       replacement: {
-                        HELPER_AMOUNT:
-                          helperState().amount | currency: 'EUR' : 'symbol' : '1.2-2',
-                      },
+                        HELPER_AMOUNT: helperState().amount | currency: 'EUR' : 'symbol' : '1.2-2'
+                      }
                     }
             }}
           </neo-text-helper>
@@ -505,9 +500,8 @@ export class SaisiePartsComponent implements OnInit {
                   : {
                       wording: template,
                       replacement: {
-                        SHARE_AMOUNT:
-                          shareData()?.shareAmount | currency: 'EUR' : 'symbol' : '1.2-2',
-                      },
+                        SHARE_AMOUNT: shareData()?.shareAmount | currency: 'EUR' : 'symbol' : '1.2-2'
+                      }
                     }
             }}
           </neo-text-helper>
@@ -516,44 +510,41 @@ export class SaisiePartsComponent implements OnInit {
     </form>
 
     <neo-slider
-      [ariaLabel]="''"
-      [min]="shareData()?.minAmount ?? 0"
-      [max]="shareData()?.selectableMaxAmount ?? 0"
-      [step]="shareData()?.shareAmount ?? 0"
-      [precision]="2"
-      [minLabel]="' '"
-      [maxLabel]="' '"
-      [value]="normalizedAmount() ?? 0"
       (valueChange)="onSliderChange($event)"
+      [ariaLabel]="''"
+      [maxLabel]="' '"
+      [max]="shareData()?.maxAmount ?? 0"
+      [minLabel]="' '"
+      [min]="shareData()?.miniAmount ?? 0"
+      [precision]="2"
+      [step]="shareData()?.shareAmount ?? 0"
+      [value]="inputControl.value ?? 0"
     />
 
     <div class="helpers">
       <neo-text-helper type="default">
-        {{ shareData()?.minAmount | currency: 'EUR' : 'symbol' : '1.2-2' }}
+        {{ shareData()?.miniAmount | currency: 'EUR' : 'symbol' : '1.2-2' }}
       </neo-text-helper>
-
       <neo-text-helper type="default">
-        {{ shareData()?.selectableMaxAmount | currency: 'EUR' : 'symbol' : '1.2-2' }}
+        {{ shareData()?.maxAmount | currency: 'EUR' : 'symbol' : '1.2-2' }}
       </neo-text-helper>
-
       <neo-text-helper type="default">
         {{
           'form.helper.shareSlider'
             | wording
               : {
                   wording: template,
-                  replacement: { NUMBER_SHARE: shareData()?.minParts },
+                  replacement: { NUMBER_SHARE: shareData()?.minParts }
                 }
         }}
       </neo-text-helper>
-
       <neo-text-helper type="default">
         {{
           'form.helper.shareSlider'
             | wording
               : {
                   wording: template,
-                  replacement: { NUMBER_SHARE: shareData()?.maxParts },
+                  replacement: { NUMBER_SHARE: shareData()?.maxParts }
                 }
         }}
       </neo-text-helper>
@@ -572,7 +563,7 @@ export class SaisiePartsComponent implements OnInit {
             [iconPosition]="'right'"
             [icon]="'download'"
             aria-haspopup="dialog"
-            (click)="openDefault()"
+            (click)="openTechnicalNotice()"
           >
             {{ template.infobox.download }}
           </button>
@@ -580,10 +571,10 @@ export class SaisiePartsComponent implements OnInit {
           <a
             class="download"
             neoButton
-            [variant]="'secondary-outline'"
             [iconPosition]="'right'"
+            [variant]="'secondary-outline'"
             [icon]="'download'"
-            [href]="noticeLink()"
+            [href]="getNoticeLink()"
           >
             {{ template.infobox.download }}
           </a>
@@ -595,13 +586,15 @@ export class SaisiePartsComponent implements OnInit {
   </div>
 
   <div cta>
-    <div neoButtonGroup [alignment]="'block'">
-      <button neoButton alignment="block" (click)="continue()" [disabled]="!canContinue()">
+    <div [alignment]="'block'" neoButtonGroup>
+      <button
+        neoButton
+        alignment="block"
+        [disabled]="isContinueDisabled()"
+        (click)="onContinue()"
+      >
         {{ template.action }}
       </button>
     </div>
   </div>
 </lib-information-prompt-layout>
-
-
-
