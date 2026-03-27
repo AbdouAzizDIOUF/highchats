@@ -7,6 +7,12 @@ keytool -importcert -alias cert3 -file cert3.pem -keystore truststore.jks
 $env:JAVA_TOOL_OPTIONS="-Djavax.net.ssl.trustStore=... -Djavax.net.ssl.trustStorePassword=dioufbpce"
 
 
+java -Djavax.net.ssl.trustStore=C:/Dev/backend/c3a93-roaws-personproxyV2/truststore.jks \
+-Djavax.net.ssl.trustStorePassword=dioufbpce \
+-Djavax.net.debug=ssl \
+-jar ton-app.jar
+
+
 CONNECTED(00000005)
 depth=3 C = FR, O = BPCE, OU = 0002 493455042, CN = BPCE UCG AC Racine
 verify error:num=19:self signed certificate in certificate chain
