@@ -1,3 +1,10 @@
+keytool -importcert -alias cert0 -file cert0.pem -keystore truststore.jks
+keytool -importcert -alias cert1 -file cert1.pem -keystore truststore.jks
+keytool -importcert -alias cert2 -file cert2.pem -keystore truststore.jks
+keytool -importcert -alias cert3 -file cert3.pem -keystore truststore.jks
+
+
+
 CONNECTED(00000005)
 depth=3 C = FR, O = BPCE, OU = 0002 493455042, CN = BPCE UCG AC Racine
 verify error:num=19:self signed certificate in certificate chain
