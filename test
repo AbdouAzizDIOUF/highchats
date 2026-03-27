@@ -24,3 +24,6 @@ mvn spring-boot:run -P dev -Dspring-boot.run.jvmArguments='-Djavax.net.ssl.trust
 
 
 mvn spring-boot:run -P dev -Dspring-boot.run.jvmArguments='-Djavax.net.ssl.trustStore=C:/Dev/backend/c3a93-roaws-personproxyV2/truststore.jks -Djavax.net.ssl.trustStorePassword=changeit'
+
+
+$env:JAVA_TOOL_OPTIONS="-Djavax.net.ssl.trustStore=C:/Dev/backend/c3a93-roaws-personproxyV2/truststore.jks -Djavax.net.ssl.trustStorePassword=changeit"
