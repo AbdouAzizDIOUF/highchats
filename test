@@ -4,6 +4,8 @@ keytool -importcert -alias cert2 -file cert2.pem -keystore truststore.jks
 keytool -importcert -alias cert3 -file cert3.pem -keystore truststore.jks
 
 
+$env:JAVA_TOOL_OPTIONS="-Djavax.net.ssl.trustStore=... -Djavax.net.ssl.trustStorePassword=dioufbpce"
+
 
 CONNECTED(00000005)
 depth=3 C = FR, O = BPCE, OU = 0002 493455042, CN = BPCE UCG AC Racine
